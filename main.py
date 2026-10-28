@@ -18,10 +18,6 @@ from telegram.ext import (
     filters,
 )
 
-# =========================
-# تنظیمات
-# =========================
-
 logging.basicConfig(level=logging.INFO)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -29,18 +25,11 @@ TOKEN = os.getenv("BOT_TOKEN", "")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 CHANNEL_ID = os.getenv("CHANNEL_ID", "@Vexora1Store")
 SUPPORT = "@Vexorini"
-
 CARD_NUMBER = os.getenv("CARD_NUMBER", "")
 CARD_NAME = os.getenv("CARD_NAME", "")
-
 DB_FILE = "vexora.db"
 
-# نرخ هر استارز به تومان
 STAR_PRICE = 3000
-
-# =========================
-# محصولات
-# =========================
 
 PRODUCTS = {
     "تدی 🧸": 55000,
@@ -72,8 +61,9 @@ MENU = ReplyKeyboardMarkup(
     resize_keyboard=True,
 )
 
+
 # =========================
-# پایگاه داده
+# DATABASE
 # =========================
 
 def connect_db():
@@ -109,7 +99,7 @@ def money(amount):
 
 
 # =========================
-# شروع ربات
+# START
 # =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -142,12 +132,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# نمایش محصولات
+# PRODUCTS
 # =========================
 
 async def show_products(update, context):
     keyboard = [
-        [InlineKeyboardButton("⭐ خرید استارز تلگرام", callback_data="stars")],
+        [InlineKeyboardButton(
+            "⭐ خرید استارز تلگرام",
+            callback_data="stars",
+        )]
     ]
 
     for name, price in PRODUCTS.items():
@@ -159,7 +152,10 @@ async def show_products(update, context):
         ])
 
     keyboard.append([
-        InlineKeyboardButton("🌐 کانفیگ V2Ray", callback_data="v2ray")
+        InlineKeyboardButton(
+            "🌐 کانفیگ V2Ray",
+            callback_data="v2ray",
+        )
     ])
 
     await update.message.reply_text(
@@ -199,10 +195,8 @@ async def button_handler(update, context):
     if query.data == "customstars":
         context.user_data["waiting_custom_stars"] = True
         await query.message.reply_text(
-            "⭐ تعداد استارز موردنظرت رو به عدد وارد کن.\n"
-            "مثال: 75\n\n"
-            "حداقل: 1 استارز\n"
-            "حداکثر: 10000 استارز"
+            "⭐ تعداد استارز موردنظرت رو وارد کن.\n"
+            "مثال: 75\nحداقل: 1\nحداکثر: 10000"
         )
         return
 
@@ -230,6 +224,7 @@ async def button_handler(update, context):
 
     if query.data.startswith("buy:"):
         product = query.data[4:]
+
         if product not in PRODUCTS:
             await query.message.reply_text("محصول پیدا نشد.")
             return
@@ -257,7 +252,7 @@ async def choose_product(message, context, product, price):
 
 
 # =========================
-# ثبت سفارش
+# CREATE ORDER
 # =========================
 
 async def create_order(update, context, target):
@@ -281,7 +276,7 @@ async def create_order(update, context, target):
                 product,
                 price,
                 target,
-                datetime.now().strftime("%Y-%m-%d %H:%M"),
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             ),
         )
         order_id = cur.lastrowid
@@ -290,13 +285,16 @@ async def create_order(update, context, target):
     context.user_data.pop("target_price", None)
     context.user_data["target_order"] = order_id
 
-    payment_info = (
-        f"💳 شماره کارت: {CARD_NUMBER}\n"
-        f"👤 به نام: {CARD_NAME}"
-        if CARD_NUMBER and CARD_NAME
-        else "روش پرداخت هنوز توسط مدیر تنظیم نشده.\n"
-             "قبل از واریز با پشتیبانی هماهنگ کن."
-    )
+    if CARD_NUMBER and CARD_NAME:
+        payment_info = (
+            f"💳 شماره کارت: {CARD_NUMBER}\n"
+            f"👤 به نام: {CARD_NAME}"
+        )
+    else:
+        payment_info = (
+            "روش پرداخت هنوز توسط مدیر تنظیم نشده.\n"
+            "قبل از پرداخت با پشتیبانی هماهنگ کن."
+        )
 
     await update.message.reply_text(
         f"✅ سفارش ثبت شد!\n\n"
@@ -333,7 +331,7 @@ async def create_order(update, context, target):
 
 
 # =========================
-# پیام‌های خصوصی و گروه
+# TEXT HANDLER
 # =========================
 
 async def text_handler(update, context):
@@ -373,6 +371,7 @@ async def text_handler(update, context):
                 "SELECT points FROM users WHERE user_id=?",
                 (user.id,),
             ).fetchone()
+
             count = con.execute(
                 "SELECT COUNT(*) FROM orders WHERE user_id=?",
                 (user.id,),
@@ -406,7 +405,7 @@ async def text_handler(update, context):
 
     if text == "🎁 مأموریت‌ها":
         await update.message.reply_text(
-            "🎁 پاداش‌های پیشنهادی:\n"
+            "🎁 پاداش‌ها:\n"
             "۳ امتیاز = ۱ استارز رایگان\n"
             "۱۸ امتیاز = ۱ گیفت تدی رایگان\n\n"
             "تحویل جوایز فعلاً با هماهنگی مدیر انجام می‌شه.",
@@ -431,6 +430,7 @@ async def text_handler(update, context):
             return
 
         result = "📋 سفارش‌های شما:\n\n"
+
         for oid, product, price, status in rows:
             result += (
                 f"شماره: VX{oid}\n"
@@ -448,7 +448,7 @@ async def text_handler(update, context):
             "۱. محصول رو انتخاب کن.\n"
             "۲. آیدی مقصد رو وارد کن.\n"
             "۳. سفارش رو بررسی کن.\n"
-            "۴. فقط پس از هماهنگی پرداخت کن.\n"
+            "۴. قبل از پرداخت با پشتیبانی هماهنگ کن.\n"
             "۵. رسید رو ارسال کن.\n\n"
             f"پشتیبانی: {SUPPORT}",
             reply_markup=MENU,
@@ -462,7 +462,6 @@ async def text_handler(update, context):
         )
         return
 
-    # گرفتن تعداد دلخواه استارز
     if context.user_data.get("waiting_custom_stars"):
         try:
             count = int(text)
@@ -488,7 +487,6 @@ async def text_handler(update, context):
         )
         return
 
-    # گرفتن آیدی مقصد برای محصول انتخاب‌شده
     if context.user_data.get("target_product"):
         await create_order(update, context, text)
         return
@@ -500,7 +498,7 @@ async def text_handler(update, context):
 
 
 # =========================
-# رسید پرداخت
+# PAYMENT RECEIPT
 # =========================
 
 async def receipt_handler(update, context):
@@ -508,6 +506,7 @@ async def receipt_handler(update, context):
         return
 
     order_id = context.user_data.get("target_order")
+
     if not order_id:
         await update.message.reply_text(
             "اول سفارش ثبت کن، بعد رسید رو بفرست."
@@ -532,7 +531,7 @@ async def receipt_handler(update, context):
 
 
 # =========================
-# تأیید یا رد پرداخت
+# ADMIN APPROVE / REJECT
 # =========================
 
 async def admin_order_handler(update, context):
@@ -557,6 +556,7 @@ async def admin_order_handler(update, context):
             return
 
         user_id = row[0]
+
         status = (
             "پرداخت تأیید شد؛ در انتظار تحویل"
             if action == "approve"
@@ -579,7 +579,7 @@ async def admin_order_handler(update, context):
 
 
 # =========================
-# اعلام تحویل سفارش
+# DELIVERED ORDER + ROSE ANNOUNCEMENT
 # =========================
 
 async def delivered(update, context):
@@ -589,7 +589,8 @@ async def delivered(update, context):
 
     if not context.args or not context.args[0].isdigit():
         await update.message.reply_text(
-            "روش استفاده:\n/delivered شماره_سفارش\n"
+            "روش استفاده:\n"
+            "/delivered شماره_سفارش\n"
             "مثال: /delivered 12"
         )
         return
@@ -598,7 +599,11 @@ async def delivered(update, context):
 
     with connect_db() as con:
         row = con.execute(
-            "SELECT user_id, product FROM orders WHERE id=?",
+            """
+            SELECT user_id, product, price, status, created
+            FROM orders
+            WHERE id=?
+            """,
             (order_id,),
         ).fetchone()
 
@@ -606,35 +611,73 @@ async def delivered(update, context):
             await update.message.reply_text("سفارش پیدا نشد.")
             return
 
-        user_id, product = row
+        user_id, product, price, status, created = row
+
+        if status == "تحویل داده شد":
+            await update.message.reply_text(
+                f"سفارش VX{order_id} قبلاً تحویل‌شده ثبت شده."
+            )
+            return
 
         con.execute(
             "UPDATE orders SET status=? WHERE id=?",
             ("تحویل داده شد", order_id),
         )
 
-    await context.bot.send_message(
-        user_id,
-        f"✅ سفارش VX{order_id} ({product}) تحویل داده شد. ممنون از خریدت!",
+    buyer = str(user_id)
+    if len(buyer) > 5:
+        buyer = f"{buyer[:3]}···{buyer[-2:]}"
+
+    delivered_time = datetime.now().strftime("%Y/%m/%d · %H:%M:%S")
+
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=(
+                f"🌹 سفارش VX{order_id} با موفقیت تحویل داده شد!\n\n"
+                f"محصول: {product}\n"
+                f"کد پیگیری: VX{order_id}\n\n"
+                "ممنون از خریدت از VEXORA STORE. 🌹"
+            ),
+        )
+    except Exception:
+        logging.exception("ارسال پیام خصوصی تحویل به مشتری ناموفق بود")
+
+    announcement = (
+        "🌹🌹🌹🌹🌹🌹🌹🌹🌹\n\n"
+        f"👑 سفارش VX{order_id} تحویل شد!\n\n"
+        f"🌹 محصول: {product}\n"
+        f"✔️ خریدار: {buyer}\n"
+        f"💰 مبلغ: {money(price)}\n"
+        f"🪪 کد پیگیری: VX{order_id}\n"
+        f"💜 ثبت سفارش: {created}\n"
+        f"🌹 زمان تحویل: {delivered_time}\n"
+        "⚡️ وضعیت: با موفقیت تحویل شد\n\n"
+        "🌹🌹🌹🌹🌹🌹🌹🌹🌹\n\n"
+        "💜 یک سفارش دیگه به مقصد رسید.\n\n"
+        "🛍 خرید از VEXORA STORE"
     )
 
     try:
         await context.bot.send_message(
-            CHANNEL_ID,
-            f"✅ یک سفارش در VEXORA تکمیل شد!\n"
-            f"شماره سفارش: VX{order_id}\n"
-            "از خرید شما سپاسگزاریم 🖤",
+            chat_id=CHANNEL_ID,
+            text=announcement,
         )
     except Exception:
         logging.exception("ارسال اعلان کانال ناموفق بود")
+        await update.message.reply_text(
+            "سفارش در دیتابیس تحویل‌شده ثبت شد، اما پیام کانال ارسال نشد. "
+            "بررسی کن ربات در کانال مدیر و مجاز به ارسال پیام باشد."
+        )
+        return
 
     await update.message.reply_text(
-        f"سفارش VX{order_id} تحویل‌شده ثبت شد."
+        f"✅ سفارش VX{order_id} تحویل‌شده ثبت شد و در کانال اعلام شد."
     )
 
 
 # =========================
-# اجرای ربات
+# RUN BOT
 # =========================
 
 def main():
@@ -656,6 +699,7 @@ def main():
             pattern=r"^(approve|reject):",
         )
     )
+
     app.add_handler(CallbackQueryHandler(button_handler))
 
     app.add_handler(
@@ -664,6 +708,7 @@ def main():
             receipt_handler,
         )
     )
+
     app.add_handler(
         MessageHandler(
             filters.TEXT & ~filters.COMMAND,
