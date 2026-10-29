@@ -1,7 +1,6 @@
 import os
+import re
 import sqlite3
-import random
-import time
 import logging
 from datetime import datetime
 
@@ -11,6 +10,7 @@ from telegram import (
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
 )
+from telegram.error import TelegramError
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -20,1513 +20,1526 @@ from telegram.ext import (
     filters,
 )
 
-# ==================================================
-# VEXORA CONFIG
-# ==================================================
+# =========================================================
+# VEXORA STORE
+# =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-CHANNEL_ID = os.getenv("CHANNEL_ID", "@Vexora1Store")
-SUPPORT = "@Vexorini"
-
-CARD_NUMBER = os.getenv("CARD_NUMBER", "")
-CARD_NAME = os.getenv("CARD_NAME", "")
-
-DB_NAME = "vexora.db"
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0") or "0")
+CHANNEL_ID = os.getenv("CHANNEL_ID", "@Vexora1Store").strip()
+SUPPORT = os.getenv("SUPPORT_USERNAME", "@Vexorini").strip()
+CARD_NUMBER = os.getenv("CARD_NUMBER", "").strip()
+CARD_NAME = os.getenv("CARD_NAME", "").strip()
+DB_NAME = os.getenv("DB_NAME", "vexora.db")
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
 )
-logger = logging.getLogger("VEXORA")
+log = logging.getLogger("VEXORA")
 
-# ==================================================
-# PRODUCTS
-# Prices are in toman
-# ==================================================
+# =========================================================
+# PRICES — TOMAN
+# =========================================================
 
-DEFAULT_PRODUCTS = {
-    "استارز 50 عدد": 100000,
-    "استارز 100 عدد": 200000,
-    "استارز 250 عدد": 500000,
-    "استارز 500 عدد": 1000000,
-    "استارز 1000 عدد": 2000000,
+PRODUCTS = {
+    "استارز 50 عدد": (180000, "stars"),
+    "استارز 100 عدد": (360000, "stars"),
+    "استارز 250 عدد": (900000, "stars"),
+    "استارز 500 عدد": (1800000, "stars"),
+    "استارز 1000 عدد": (3600000, "stars"),
+    "استارز 2500 عدد": (9000000, "stars"),
 
-    "گیفت تدی": 55000,
-    "گیفت قلب": 55000,
-    "گیفت رز": 95000,
+    "گیفت تدی": (60000, "gift"),
+    "گیفت قلب": (60000, "gift"),
+    "گیفت رز": (100000, "gift"),
+    "گیفت جعبه هدیه": (100000, "gift"),
+    "گیفت کیک": (200000, "gift"),
+    "گیفت دسته گل": (200000, "gift"),
+    "گیفت موشک": (200000, "gift"),
+    "گیفت شامپاین": (200000, "gift"),
+    "گیفت جام": (400000, "gift"),
+    "گیفت الماس": (400000, "gift"),
+    "گیفت حلقه": (400000, "gift"),
 
-    "پریمیوم 3 ماهه": 2990000,
-    "پریمیوم 6 ماهه": 3990000,
-    "پریمیوم 12 ماهه": 6990000,
+    "پرمیوم 3 ماهه": (3090000, "premium"),
+    "پرمیوم 6 ماهه": (4090000, "premium"),
+    "پرمیوم 12 ماهه": (7090000, "premium"),
 }
 
-# ==================================================
-# DATABASE
-# ==================================================
+STATUS = {
+    "waiting_payment": "در انتظار پرداخت",
+    "receipt_sent": "رسید ارسال شده؛ در انتظار بررسی",
+    "paid": "پرداخت تأیید شده؛ در انتظار تحویل",
+    "delivered": "تحویل شده",
+    "rejected": "پرداخت رد شده",
+    "cancelled": "لغو شده",
+}
 
-def db():
-    conn = sqlite3.connect(DB_NAME)
-    conn.row_factory = sqlite3.Row
-    return conn
+MAIN_MENU = ReplyKeyboardMarkup(
+    [
+        ["⭐ خرید استارز", "🎁 خرید گیفت"],
+        ["💎 خرید پرمیوم", "⚙️ خرید کانفیگ"],
+        ["💳 شارژ کیف پول", "👛 کیف پول من"],
+        ["🔗 دعوت از دوستان", "💰 درآمد من"],
+        ["🏆 امتیاز وکسورا", "🛒 سفارش‌های من"],
+        ["🔎 پیگیری سفارش", "📖 راهنمای خرید"],
+        ["❓ سؤالات متداول", "👨‍💻 پشتیبانی"],
+    ],
+    resize_keyboard=True,
+)
+
+
+# =========================================================
+# DATABASE
+# =========================================================
+
+def connect_db():
+    con = sqlite3.connect(DB_NAME, timeout=20)
+    con.row_factory = sqlite3.Row
+    con.execute("PRAGMA foreign_keys=ON")
+    return con
 
 
 def init_db():
-    conn = db()
-    cur = conn.cursor()
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS products (
-            name TEXT PRIMARY KEY,
-            price INTEGER NOT NULL,
-            active INTEGER DEFAULT 1
-        )
-    """)
-
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS users (
+    with connect_db() as con:
+        con.executescript("""
+        CREATE TABLE IF NOT EXISTS users(
             user_id INTEGER PRIMARY KEY,
             username TEXT DEFAULT '',
-            coins INTEGER DEFAULT 0,
+            balance INTEGER DEFAULT 0,
             points INTEGER DEFAULT 0,
             invited_by INTEGER DEFAULT 0,
-            last_work INTEGER DEFAULT 0,
-            last_daily INTEGER DEFAULT 0
-        )
-    """)
+            created_at TEXT DEFAULT ''
+        );
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS orders (
+        CREATE TABLE IF NOT EXISTS orders(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER NOT NULL,
             username TEXT DEFAULT '',
             product TEXT NOT NULL,
             price INTEGER NOT NULL,
             target TEXT DEFAULT '',
-            status TEXT DEFAULT 'waiting',
+            status TEXT DEFAULT 'waiting_payment',
             receipt_id TEXT DEFAULT '',
-            created_at TEXT DEFAULT ''
-        )
-    """)
+            receipt_type TEXT DEFAULT '',
+            created_at TEXT DEFAULT '',
+            updated_at TEXT DEFAULT '',
+            delivered_at TEXT DEFAULT '',
+            commission_done INTEGER DEFAULT 0,
+            channel_posted INTEGER DEFAULT 0
+        );
 
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS referrals (
+        CREATE TABLE IF NOT EXISTS referrals(
+            invited_id INTEGER PRIMARY KEY,
             inviter_id INTEGER NOT NULL,
-            invited_id INTEGER NOT NULL UNIQUE,
+            points_awarded INTEGER DEFAULT 0,
+            commission_paid INTEGER DEFAULT 0,
             created_at TEXT DEFAULT ''
-        )
-    """)
+        );
 
-    for name, price in DEFAULT_PRODUCTS.items():
-        cur.execute(
-            "INSERT OR IGNORE INTO products (name, price) VALUES (?, ?)",
-            (name, price),
-        )
+        CREATE TABLE IF NOT EXISTS wallet_transactions(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            description TEXT DEFAULT '',
+            created_at TEXT DEFAULT ''
+        );
 
-    conn.commit()
-    conn.close()
+        CREATE TABLE IF NOT EXISTS topups(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            receipt_id TEXT DEFAULT '',
+            receipt_type TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS withdrawals(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            destination TEXT DEFAULT '',
+            status TEXT DEFAULT 'pending',
+            created_at TEXT DEFAULT ''
+        );
+        """)
+
+        # Update old database schema safely.
+        cols = {
+            row["name"]
+            for row in con.execute("PRAGMA table_info(orders)")
+        }
+        for name, definition in [
+            ("receipt_type", "TEXT DEFAULT ''"),
+            ("updated_at", "TEXT DEFAULT ''"),
+            ("delivered_at", "TEXT DEFAULT ''"),
+            ("commission_done", "INTEGER DEFAULT 0"),
+            ("channel_posted", "INTEGER DEFAULT 0"),
+        ]:
+            if name not in cols:
+                con.execute(
+                    f"ALTER TABLE orders ADD COLUMN {name} {definition}"
+                )
+
+        con.commit()
 
 
-def ensure_user(user):
+def now():
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def toman(amount):
+    return f"{int(amount):,} تومان"
+
+
+def admin(user_id):
+    return ADMIN_ID != 0 and user_id == ADMIN_ID
+
+
+def register_user(user, referrer=0):
     if not user:
         return
 
-    conn = db()
-    conn.execute("""
-        INSERT INTO users (user_id, username)
-        VALUES (?, ?)
-        ON CONFLICT(user_id)
-        DO UPDATE SET username = excluded.username
-    """, (user.id, user.username or ""))
+    with connect_db() as con:
+        exists = con.execute(
+            "SELECT user_id FROM users WHERE user_id=?",
+            (user.id,),
+        ).fetchone()
 
-    conn.commit()
-    conn.close()
+        if not exists:
+            valid_referrer = 0
 
+            if referrer and referrer != user.id:
+                ref = con.execute(
+                    "SELECT user_id FROM users WHERE user_id=?",
+                    (referrer,),
+                ).fetchone()
+                if ref:
+                    valid_referrer = referrer
 
-def get_products():
-    conn = db()
-    rows = conn.execute("""
-        SELECT name, price FROM products
-        WHERE active = 1
-        ORDER BY name
-    """).fetchall()
-    conn.close()
-    return rows
+            con.execute(
+                """
+                INSERT INTO users(
+                    user_id, username, invited_by, created_at
+                ) VALUES(?,?,?,?)
+                """,
+                (
+                    user.id,
+                    user.username or "",
+                    valid_referrer,
+                    now(),
+                ),
+            )
 
+            if valid_referrer:
+                con.execute(
+                    """
+                    INSERT OR IGNORE INTO referrals(
+                        invited_id, inviter_id, created_at
+                    ) VALUES(?,?,?)
+                    """,
+                    (user.id, valid_referrer, now()),
+                )
+        else:
+            con.execute(
+                "UPDATE users SET username=? WHERE user_id=?",
+                (user.username or "", user.id),
+            )
 
-def get_product(name):
-    conn = db()
-    row = conn.execute(
-        "SELECT name, price FROM products WHERE name = ? AND active = 1",
-        (name,),
-    ).fetchone()
-    conn.close()
-    return row
-
-
-def is_admin(user_id):
-    return user_id == ADMIN_ID and ADMIN_ID != 0
-
-
-def main_menu():
-    return ReplyKeyboardMarkup(
-        [
-            ["🛍 فروشگاه", "📦 سفارش‌های من"],
-            ["💰 کیف پول", "🎁 دعوت دوستان"],
-            ["📜 راهنمای پرداخت", "🎧 پشتیبانی"],
-        ],
-        resize_keyboard=True,
-    )
-
-
-def money(value):
-    return f"{int(value):,} تومان"
+        con.commit()
 
 
-# ==================================================
-# START / REFERRAL
-# ==================================================
+def user_balance(user_id):
+    with connect_db() as con:
+        row = con.execute(
+            "SELECT balance FROM users WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+        return row["balance"] if row else 0
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+def user_points(user_id):
+    with connect_db() as con:
+        row = con.execute(
+            "SELECT points FROM users WHERE user_id=?",
+            (user_id,),
+        ).fetchone()
+        return row["points"] if row else 0
+
+
+# =========================================================
+# CHANNEL MEMBERSHIP
+# The bot must be an administrator in the channel.
+# =========================================================
+
+async def is_channel_member(bot, user_id):
+    try:
+        member = await bot.get_chat_member(CHANNEL_ID, user_id)
+        return member.status in ("member", "administrator", "creator")
+    except TelegramError:
+        # If membership cannot be checked, don't falsely award referrals.
+        return False
+
+
+async def require_membership(update, context):
     user = update.effective_user
-    ensure_user(user)
+    if not user:
+        return False
 
-    # Referral link: /start USER_ID
-    if context.args:
-        try:
-            inviter_id = int(context.args[0])
+    if admin(user.id):
+        return True
 
-            if inviter_id != user.id:
-                conn = db()
-                already = conn.execute(
-                    "SELECT invited_id FROM referrals WHERE invited_id = ?",
-                    (user.id,),
-                ).fetchone()
+    if await is_channel_member(context.bot, user.id):
+        return True
 
-                inviter_exists = conn.execute(
-                    "SELECT user_id FROM users WHERE user_id = ?",
-                    (inviter_id,),
-                ).fetchone()
-
-                if not already and inviter_exists:
-                    conn.execute("""
-                        INSERT INTO referrals
-                        (inviter_id, invited_id, created_at)
-                        VALUES (?, ?, ?)
-                    """, (
-                        inviter_id,
-                        user.id,
-                        datetime.now().isoformat(timespec="seconds"),
-                    ))
-
-                    conn.execute("""
-                        UPDATE users
-                        SET points = points + 1
-                        WHERE user_id = ?
-                    """, (inviter_id,))
-
-                    conn.commit()
-
-                    try:
-                        await context.bot.send_message(
-                            inviter_id,
-                            "🎉 یک نفر با لینک دعوتت وارد وکسورا شد!\n"
-                            "یک امتیاز به حسابت اضافه شد."
-                        )
-                    except Exception:
-                        pass
-
-                conn.close()
-
-        except (ValueError, TypeError):
-            pass
-
-    text = (
-        "به فروشگاه VEXORA خوش آمدی.\n\n"
-        "فروش استارز، گیفت و تلگرام پریمیوم\n"
-        "ثبت سفارش از طریق ربات انجام می‌شود.\n\n"
-        f"پشتیبانی: {SUPPORT}\n\n"
-        "برای شروع، از منوی زیر استفاده کن."
-    )
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "عضویت در کانال",
+                url="https://t.me/Vexora1Store",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                "بررسی عضویت",
+                callback_data="check_membership",
+            )
+        ],
+    ])
 
     await update.effective_message.reply_text(
-        text,
-        reply_markup=main_menu(),
+        "برای استفاده از ربات، ابتدا عضو کانال VEXORA شو.",
+        reply_markup=keyboard,
+    )
+    return False
+
+
+# =========================================================
+# ORDERS
+# =========================================================
+
+def create_order(user, product, price, target):
+    with connect_db() as con:
+        cur = con.execute(
+            """
+            INSERT INTO orders(
+                user_id, username, product, price, target,
+                status, created_at, updated_at
+            ) VALUES(?,?,?,?,?,?,?,?)
+            """,
+            (
+                user.id,
+                user.username or "",
+                product,
+                price,
+                target,
+                "waiting_payment",
+                now(),
+                now(),
+            ),
+        )
+        con.commit()
+        return cur.lastrowid
+
+
+def get_order(order_id):
+    with connect_db() as con:
+        return con.execute(
+            "SELECT * FROM orders WHERE id=?",
+            (order_id,),
+        ).fetchone()
+
+
+async def order_payment_instructions(message, order_id):
+    order = get_order(order_id)
+    if not order:
+        await message.reply_text("سفارش پیدا نشد.")
+        return
+
+    card = CARD_NUMBER or "شماره کارت هنوز توسط مدیریت تنظیم نشده است."
+    owner = CARD_NAME or "نام صاحب کارت تنظیم نشده است."
+
+    await message.reply_text(
+        f"سفارش شما ثبت شد.\n\n"
+        f"شماره سفارش: VX{order_id:06d}\n"
+        f"محصول: {order['product']}\n"
+        f"مبلغ: {toman(order['price'])}\n\n"
+        f"شماره کارت:\n{card}\n"
+        f"به نام: {owner}\n\n"
+        "پس از پرداخت، تصویر رسید را همین‌جا ارسال کن.\n"
+        "سفارش پس از بررسی مدیریت تأیید می‌شود.",
+        reply_markup=MAIN_MENU,
     )
 
 
-# ==================================================
-# STORE
-# ==================================================
+async def send_admin_order_receipt(context, order_id):
+    order = get_order(order_id)
+    if not order or not ADMIN_ID:
+        return
 
-async def show_store(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    products = get_products()
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(
+                "تأیید پرداخت",
+                callback_data=f"approve:{order_id}",
+            ),
+            InlineKeyboardButton(
+                "رد پرداخت",
+                callback_data=f"reject:{order_id}",
+            ),
+        ]
+    ])
+
+    caption = (
+        f"رسید سفارش VX{order_id:06d}\n"
+        f"کاربر: {order['user_id']}\n"
+        f"محصول: {order['product']}\n"
+        f"مبلغ: {toman(order['price'])}\n"
+        f"وضعیت: {STATUS.get(order['status'], order['status'])}"
+    )
+
+    try:
+        if order["receipt_type"] == "photo":
+            await context.bot.send_photo(
+                ADMIN_ID,
+                order["receipt_id"],
+                caption=caption,
+                reply_markup=keyboard,
+            )
+        else:
+            await context.bot.send_document(
+                ADMIN_ID,
+                order["receipt_id"],
+                caption=caption,
+                reply_markup=keyboard,
+            )
+    except TelegramError:
+        log.exception("Failed to send receipt to admin")
+
+
+async def buy_product(update, context, category):
+    products = [
+        (name, price)
+        for name, (price, cat) in PRODUCTS.items()
+        if cat == category
+    ]
 
     if not products:
         await update.effective_message.reply_text(
-            "در حال حاضر محصولی موجود نیست."
+            "فعلاً محصولی در این بخش موجود نیست."
         )
         return
 
-    keyboard = []
+    keyboard = [
+        [
+            InlineKeyboardButton(
+                f"{name} — {toman(price)}",
+                callback_data=f"buy:{name}",
+            )
+        ]
+        for name, price in products
+    ]
 
-    for product in products:
+    if category == "stars":
         keyboard.append([
             InlineKeyboardButton(
-                f"{product['name']} | {money(product['price'])}",
-                callback_data=f"product:{product['name']}",
+                "✍️ تعداد دلخواه استارز",
+                callback_data="custom_stars",
             )
         ])
 
     await update.effective_message.reply_text(
-        "🛍 فروشگاه VEXORA\n\n"
         "محصول موردنظرت را انتخاب کن:",
         reply_markup=InlineKeyboardMarkup(keyboard),
     )
 
 
-async def product_selected(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    query = update.callback_query
-    await query.answer()
+# =========================================================
+# START / MENU
+# =========================================================
 
-    name = query.data.split(":", 1)[1]
-    product = get_product(name)
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    referrer = 0
 
-    if not product:
-        await query.edit_message_text("این محصول در دسترس نیست.")
-        return
+    if context.args:
+        arg = context.args[0]
+        if arg.startswith("ref_"):
+            try:
+                referrer = int(arg[4:])
+            except ValueError:
+                pass
 
-    context.user_data["selected_product"] = name
+    register_user(user, referrer)
 
-    keyboard = [[
-        InlineKeyboardButton(
-            "🛒 ثبت سفارش",
-            callback_data="create_order",
-        )
-    ]]
-
-    await query.edit_message_text(
-        f"محصول: {name}\n"
-        f"قیمت: {money(product['price'])}\n\n"
-        "برای ادامه روی ثبت سفارش بزن.",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+    await update.effective_message.reply_text(
+        "به فروشگاه VEXORA خوش اومدی.\n\n"
+        "استارز، گیفت و پرمیوم تلگرام رو از منوی زیر انتخاب کن.\n"
+        "برای خرید، ابتدا محصول رو انتخاب کن و سپس اطلاعات سفارش رو وارد کن.",
+        reply_markup=MAIN_MENU,
     )
 
 
-async def create_order(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+async def menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    if not user:
+        return
+
+    register_user(user)
+
+    text = update.effective_message.text or ""
+
+    if text == "⭐ خرید استارز":
+        if await require_membership(update, context):
+            await buy_product(update, context, "stars")
+
+    elif text == "🎁 خرید گیفت":
+        if await require_membership(update, context):
+            await buy_product(update, context, "gift")
+
+    elif text == "💎 خرید پرمیوم":
+        if await require_membership(update, context):
+            await buy_product(update, context, "premium")
+
+    elif text == "⚙️ خرید کانفیگ":
+        await update.effective_message.reply_text(
+            f"برای خرید کانفیگ و دریافت جزئیات با پشتیبانی ارتباط بگیر:\n{SUPPORT}"
+        )
+
+    elif text == "👛 کیف پول من":
+        await update.effective_message.reply_text(
+            f"موجودی کیف پولت: {toman(user_balance(user.id))}\n\n"
+            "برای افزایش موجودی، گزینه «شارژ کیف پول» را بزن."
+        )
+
+    elif text == "💳 شارژ کیف پول":
+        context.user_data["state"] = "topup_amount"
+        await update.effective_message.reply_text(
+            "مبلغ شارژ کیف پول را به تومان وارد کن.\n"
+            "مثال: 200000"
+        )
+
+    elif text == "🔗 دعوت از دوستان":
+        me = await context.bot.get_me()
+        link = f"https://t.me/{me.username}?start=ref_{user.id}"
+
+        with connect_db() as con:
+            count = con.execute(
+                "SELECT COUNT(*) AS n FROM referrals WHERE inviter_id=?",
+                (user.id,),
+            ).fetchone()["n"]
+
+        await update.effective_message.reply_text(
+            f"لینک دعوت اختصاصی تو:\n{link}\n\n"
+            f"تعداد دعوت‌شده‌ها: {count}\n"
+            "با خرید و تحویل سفارش دعوت‌شده، ۵۰٪ مبلغ سفارش به کیف پولت اضافه می‌شود.\n"
+            "دعوت‌شده باید عضو کانال باشد."
+        )
+
+    elif text == "💰 درآمد من":
+        with connect_db() as con:
+            row = con.execute(
+                """
+                SELECT COALESCE(SUM(amount),0) AS total
+                FROM wallet_transactions
+                WHERE user_id=? AND description LIKE '%پورسانت%'
+                """,
+                (user.id,),
+            ).fetchone()
+
+        await update.effective_message.reply_text(
+            f"مجموع پورسانت ثبت‌شده: {toman(row['total'])}\n"
+            f"موجودی فعلی: {toman(user_balance(user.id))}"
+        )
+
+    elif text == "🏆 امتیاز وکسورا":
+        points = user_points(user.id)
+        await update.effective_message.reply_text(
+            f"امتیاز وکسورای تو: {points}\n\n"
+            "۳ امتیاز: درخواست جایزه استارز\n"
+            "۱۸ امتیاز: درخواست گیفت تدی\n"
+            "هر امتیاز قابل خرید است: ۱٬۰۰۰ تومان\n\n"
+            "درخواست جایزه پس از بررسی مدیریت انجام می‌شود."
+        )
+
+    elif text == "🛒 سفارش‌های من":
+        with connect_db() as con:
+            orders = con.execute(
+                """
+                SELECT * FROM orders
+                WHERE user_id=?
+                ORDER BY id DESC LIMIT 10
+                """,
+                (user.id,),
+            ).fetchall()
+
+        if not orders:
+            await update.effective_message.reply_text(
+                "هنوز سفارشی ثبت نکردی."
+            )
+            return
+
+        lines = ["آخرین سفارش‌های تو:\n"]
+        for order in orders:
+            lines.append(
+                f"VX{order['id']:06d} | {order['product']}\n"
+                f"مبلغ: {toman(order['price'])}\n"
+                f"وضعیت: {STATUS.get(order['status'], order['status'])}\n"
+            )
+
+        await update.effective_message.reply_text("\n".join(lines))
+
+    elif text == "🔎 پیگیری سفارش":
+        context.user_data["state"] = "track_order"
+        await update.effective_message.reply_text(
+            "شماره سفارش را وارد کن؛ مثال: VX000001"
+        )
+
+    elif text == "📖 راهنمای خرید":
+        await update.effective_message.reply_text(
+            "راهنمای خرید VEXORA\n\n"
+            "۱. محصول را انتخاب کن.\n"
+            "۲. یوزرنیم یا اطلاعات لازم سفارش را وارد کن.\n"
+            "۳. مبلغ را به کارت اعلام‌شده پرداخت کن.\n"
+            "۴. تصویر رسید را ارسال کن.\n"
+            "۵. پس از تأیید پرداخت، سفارش در انتظار تحویل می‌ماند.\n"
+            "۶. پس از تحویل واقعی، وضعیت سفارش تکمیل می‌شود.\n\n"
+            "تأیید پرداخت به معنی تحویل محصول نیست."
+        )
+
+    elif text == "❓ سؤالات متداول":
+        await update.effective_message.reply_text(
+            "سؤالات متداول\n\n"
+            "• سفارش من کجاست؟ از بخش پیگیری سفارش استفاده کن.\n"
+            "• رسیدم بررسی نشده؟ کمی صبر کن یا به پشتیبانی پیام بده.\n"
+            "• پرداخت تأیید شده ولی محصول نرسیده؟ وضعیت سفارش در انتظار تحویل است.\n"
+            "• برای کانفیگ چه کنم؟ به پشتیبانی پیام بده."
+        )
+
+    elif text == "👨‍💻 پشتیبانی":
+        await update.effective_message.reply_text(
+            f"پشتیبانی VEXORA:\n{SUPPORT}"
+        )
+
+    elif text == "🎯 مأموریت‌ها":
+        await update.effective_message.reply_text(
+            "برای دریافت امتیاز، دوستانت را با لینک اختصاصی دعوت کن.\n"
+            "امتیاز دعوت پس از عضویت دعوت‌شده در کانال بررسی می‌شود."
+        )
+
+    elif text == "🎮 سرگرمی و بازی":
+        await update.effective_message.reply_text(
+            "بخش سرگرمی در حال آماده‌سازی است."
+        )
+
+
+# =========================================================
+# CALLBACKS
+# =========================================================
+
+async def callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
     user = query.from_user
-    ensure_user(user)
+    register_user(user)
+    data = query.data or ""
 
-    name = context.user_data.get("selected_product")
-    product = get_product(name) if name else None
-
-    if not product:
-        await query.edit_message_text(
-            "محصول پیدا نشد. لطفاً دوباره از فروشگاه انتخاب کن."
-        )
-        return
-
-    context.user_data["waiting_target"] = True
-
-    await query.edit_message_text(
-        f"محصول انتخابی: {name}\n"
-        f"مبلغ: {money(product['price'])}\n\n"
-        "حالا یوزرنیم مقصد را ارسال کن.\n"
-        "مثال: @username\n\n"
-        "رمز عبور و کد ورود تلگرام را ارسال نکن."
-    )
-
-
-async def handle_target(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    if not context.user_data.get("waiting_target"):
-        return
-
-    target = update.effective_message.text.strip()
-
-    if not target or len(target) > 100:
-        await update.effective_message.reply_text(
-            "یوزرنیم معتبر را ارسال کن."
-        )
-        return
-
-    name = context.user_data.get("selected_product")
-    product = get_product(name) if name else None
-
-    if not product:
-        context.user_data.pop("waiting_target", None)
-        await update.effective_message.reply_text(
-            "محصول پیدا نشد. دوباره از فروشگاه انتخاب کن."
-        )
-        return
-
-    user = update.effective_user
-
-    conn = db()
-    cur = conn.execute("""
-        INSERT INTO orders
-        (user_id, username, product, price, target, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-    """, (
-        user.id,
-        user.username or "",
-        name,
-        product["price"],
-        target,
-        "waiting_payment",
-        datetime.now().isoformat(timespec="seconds"),
-    ))
-
-    order_id = cur.lastrowid
-    conn.commit()
-    conn.close()
-
-    context.user_data.pop("waiting_target", None)
-    context.user_data.pop("selected_product", None)
-
-    payment_text = (
-        f"سفارش شما ثبت شد.\n\n"
-        f"شماره سفارش: #{order_id}\n"
-        f"محصول: {name}\n"
-        f"مبلغ: {money(product['price'])}\n"
-        f"مقصد: {target}\n\n"
-        "پس از پرداخت، تصویر رسید را همین‌جا ارسال کن."
-    )
-
-    if CARD_NUMBER:
-        payment_text += (
-            f"\n\nشماره کارت:\n{CARD_NUMBER}"
-        )
-
-    if CARD_NAME:
-        payment_text += f"\nبه نام: {CARD_NAME}"
-
-    await update.effective_message.reply_text(payment_text)
-
-    if ADMIN_ID:
-        try:
-            await context.bot.send_message(
-                ADMIN_ID,
-                f"🛒 سفارش جدید #{order_id}\n\n"
-                f"کاربر: {user.full_name}\n"
-                f"آیدی: {user.id}\n"
-                f"یوزرنیم: @{user.username or 'ندارد'}\n"
-                f"محصول: {name}\n"
-                f"مبلغ: {money(product['price'])}\n"
-                f"مقصد: {target}\n"
-                "وضعیت: در انتظار پرداخت",
+    if data == "check_membership":
+        if await is_channel_member(context.bot, user.id):
+            await query.edit_message_text(
+                "عضویتت تأیید شد. حالا از منوی ربات استفاده کن."
             )
-        except Exception as e:
-            logger.warning("Admin notification failed: %s", e)
-
-
-# ==================================================
-# RECEIPTS
-# ==================================================
-
-async def receive_receipt(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    user = update.effective_user
-    ensure_user(user)
-
-    conn = db()
-    order = conn.execute("""
-        SELECT * FROM orders
-        WHERE user_id = ?
-        AND status = 'waiting_payment'
-        ORDER BY id DESC LIMIT 1
-    """, (user.id,)).fetchone()
-    conn.close()
-
-    if not order:
+        else:
+            await query.edit_message_text(
+                "هنوز عضویتت تأیید نشده. ابتدا عضو کانال شو و دوباره امتحان کن."
+            )
         return
 
+    if data == "custom_stars":
+        context.user_data["state"] = "custom_stars"
+        await query.message.reply_text(
+            "تعداد استارز موردنظرت را وارد کن.\n"
+            "حداقل ۵۰ عدد؛ قیمت هر استارز ۳٬۶۰۰ تومان است."
+        )
+        return
+
+    if data.startswith("buy:"):
+        if not await is_channel_member(context.bot, user.id) and not admin(user.id):
+            await query.message.reply_text(
+                "برای خرید ابتدا عضو کانال شو:\nhttps://t.me/Vexora1Store"
+            )
+            return
+
+        product = data[4:]
+        item = PRODUCTS.get(product)
+
+        if not item:
+            await query.message.reply_text("این محصول پیدا نشد.")
+            return
+
+        context.user_data["pending_product"] = product
+        context.user_data["pending_price"] = item[0]
+        context.user_data["state"] = "order_target"
+
+        if product.startswith("استارز"):
+            prompt = "یوزرنیم تلگرام یا اطلاعات لازم برای تحویل استارز را وارد کن."
+        elif product.startswith("گیفت"):
+            prompt = "یوزرنیم گیرنده گیفت را وارد کن."
+        else:
+            prompt = "یوزرنیم تلگرام و اطلاعات لازم برای پرمیوم را وارد کن."
+
+        await query.message.reply_text(
+            prompt + "\n\nبرای لغو سفارش، /cancel را بفرست."
+        )
+        return
+
+    if data.startswith("approve:"):
+        if not admin(user.id):
+            await query.answer("اجازه دسترسی نداری.", show_alert=True)
+            return
+
+        order_id = int(data.split(":")[1])
+
+        with connect_db() as con:
+            order = con.execute(
+                "SELECT * FROM orders WHERE id=?",
+                (order_id,),
+            ).fetchone()
+
+            if not order or order["status"] != "receipt_sent":
+                await query.message.reply_text(
+                    "این سفارش وجود ندارد یا قبلاً بررسی شده است."
+                )
+                return
+
+            con.execute(
+                """
+                UPDATE orders
+                SET status='paid', updated_at=?
+                WHERE id=? AND status='receipt_sent'
+                """,
+                (now(), order_id),
+            )
+            con.commit()
+
+        await context.bot.send_message(
+            order["user_id"],
+            f"پرداخت سفارش VX{order_id:06d} تأیید شد.\n"
+            "سفارش در انتظار تحویل است. پس از تحویل واقعی، وضعیت تکمیل می‌شود."
+        )
+        await query.message.reply_text(
+            f"پرداخت سفارش VX{order_id:06d} تأیید شد.\n"
+            f"برای ثبت تحویل واقعی، دستور زیر را بفرست:\n"
+            f"/delivered {order_id}"
+        )
+        return
+
+    if data.startswith("reject:"):
+        if not admin(user.id):
+            await query.answer("اجازه دسترسی نداری.", show_alert=True)
+            return
+
+        order_id = int(data.split(":")[1])
+
+        with connect_db() as con:
+            order = con.execute(
+                "SELECT * FROM orders WHERE id=?",
+                (order_id,),
+            ).fetchone()
+
+            if not order or order["status"] != "receipt_sent":
+                await query.message.reply_text(
+                    "این سفارش وجود ندارد یا قبلاً بررسی شده است."
+                )
+                return
+
+            con.execute(
+                """
+                UPDATE orders
+                SET status='rejected', updated_at=?
+                WHERE id=? AND status='receipt_sent'
+                """,
+                (now(), order_id),
+            )
+            con.commit()
+
+        await context.bot.send_message(
+            order["user_id"],
+            f"رسید سفارش VX{order_id:06d} رد شد.\n"
+            "برای بررسی بیشتر با پشتیبانی تماس بگیر."
+        )
+        await query.message.reply_text(
+            f"رسید سفارش VX{order_id:06d} رد شد."
+        )
+        return
+
+    if data.startswith("topup_approve:"):
+        if not admin(user.id):
+            return
+
+        topup_id = int(data.split(":")[1])
+
+        with connect_db() as con:
+            topup = con.execute(
+                "SELECT * FROM topups WHERE id=?",
+                (topup_id,),
+            ).fetchone()
+
+            if not topup or topup["status"] != "pending":
+                await query.message.reply_text(
+                    "این درخواست قبلاً بررسی شده است."
+                )
+                return
+
+            con.execute(
+                "UPDATE topups SET status='approved' WHERE id=?",
+                (topup_id,),
+            )
+            con.execute(
+                "UPDATE users SET balance=balance+? WHERE user_id=?",
+                (topup["amount"], topup["user_id"]),
+            )
+            con.execute(
+                """
+                INSERT INTO wallet_transactions(
+                    user_id,amount,description,created_at
+                ) VALUES(?,?,?,?)
+                """,
+                (
+                    topup["user_id"],
+                    topup["amount"],
+                    f"شارژ کیف پول #{topup_id}",
+                    now(),
+                ),
+            )
+            con.commit()
+
+        await context.bot.send_message(
+            topup["user_id"],
+            f"شارژ کیف پولت به مبلغ {toman(topup['amount'])} تأیید شد."
+        )
+        await query.message.reply_text("شارژ کیف پول تأیید شد.")
+        return
+
+
+# =========================================================
+# TEXT INPUTS
+# =========================================================
+
+async def text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
     message = update.effective_message
 
-    if message.photo:
-        receipt_id = message.photo[-1].file_id
-    elif message.document:
-        receipt_id = message.document.file_id
-    else:
+    if not user or not message or not message.text:
+        return
+
+    register_user(user)
+    state = context.user_data.get("state")
+    text = message.text.strip()
+
+    if state == "order_target":
+        product = context.user_data.get("pending_product")
+        price = context.user_data.get("pending_price")
+
+        if not product or not price:
+            context.user_data.pop("state", None)
+            await message.reply_text(
+                "اطلاعات سفارش منقضی شده. دوباره محصول را انتخاب کن.",
+                reply_markup=MAIN_MENU,
+            )
+            return
+
+        if len(text) < 3 or len(text) > 200:
+            await message.reply_text(
+                "اطلاعات واردشده معتبر نیست؛ دوباره وارد کن."
+            )
+            return
+
+        order_id = create_order(user, product, price, text)
+
+        context.user_data.pop("pending_product", None)
+        context.user_data.pop("pending_price", None)
+        context.user_data.pop("state", None)
+
+        await order_payment_instructions(message, order_id)
+        return
+
+    if state == "custom_stars":
+        try:
+            quantity = int(text)
+        except ValueError:
+            await message.reply_text("فقط تعداد را به عدد وارد کن.")
+            return
+
+        if quantity < 50 or quantity > 2500:
+            await message.reply_text(
+                "تعداد باید بین ۵۰ تا ۲۵۰۰ استارز باشد."
+            )
+            return
+
+        price = quantity * 3600
+        product = f"استارز سفارشی {quantity} عدد"
+        context.user_data["pending_product"] = product
+        context.user_data["pending_price"] = price
+        context.user_data["state"] = "order_target"
+
         await message.reply_text(
-            "لطفاً تصویر رسید پرداخت را به‌صورت عکس یا فایل ارسال کن."
+            f"تعداد: {quantity}\n"
+            f"مبلغ: {toman(price)}\n\n"
+            "یوزرنیم تلگرام یا اطلاعات لازم برای تحویل را وارد کن."
         )
         return
 
-    conn = db()
-    conn.execute(
-        "UPDATE orders SET receipt_id = ?, status = 'receipt_sent' WHERE id = ?",
-        (receipt_id, order["id"]),
-    )
-    conn.commit()
-    conn.close()
+    if state == "topup_amount":
+        try:
+            amount = int(text.replace(",", ""))
+        except ValueError:
+            await message.reply_text("مبلغ را فقط به عدد وارد کن.")
+            return
+
+        if amount < 10000 or amount > 100000000:
+            await message.reply_text(
+                "مبلغ شارژ باید بین ۱۰٬۰۰۰ تا ۱۰۰٬۰۰۰٬۰۰۰ تومان باشد."
+            )
+            return
+
+        context.user_data["topup_amount"] = amount
+        context.user_data["state"] = "topup_receipt"
+
+        card = CARD_NUMBER or "شماره کارت هنوز تنظیم نشده است."
+        owner = CARD_NAME or "نام صاحب کارت تنظیم نشده است."
+
+        await message.reply_text(
+            f"مبلغ شارژ: {toman(amount)}\n"
+            f"شماره کارت: {card}\n"
+            f"به نام: {owner}\n\n"
+            "پس از پرداخت، تصویر رسید را ارسال کن."
+        )
+        return
+
+    if state == "track_order":
+        match = re.search(r"(\d+)", text)
+        if not match:
+            await message.reply_text("شماره سفارش معتبر نیست.")
+            return
+
+        order_id = int(match.group(1))
+
+        with connect_db() as con:
+            order = con.execute(
+                "SELECT * FROM orders WHERE id=? AND user_id=?",
+                (order_id, user.id),
+            ).fetchone()
+
+        context.user_data.pop("state", None)
+
+        if not order:
+            await message.reply_text(
+                "سفارشی با این شماره برای حساب تو پیدا نشد."
+            )
+            return
+
+        await message.reply_text(
+            f"شماره سفارش: VX{order['id']:06d}\n"
+            f"محصول: {order['product']}\n"
+            f"مبلغ: {toman(order['price'])}\n"
+            f"وضعیت: {STATUS.get(order['status'], order['status'])}\n"
+            f"تاریخ ثبت: {order['created_at']}"
+        )
+        return
+
+    await menu(update, context)
+
+
+# =========================================================
+# RECEIPTS
+# =========================================================
+
+async def receipt_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    message = update.effective_message
+
+    if not user or not message:
+        return
+
+    register_user(user)
+    state = context.user_data.get("state")
+
+    if state == "topup_receipt":
+        amount = context.user_data.get("topup_amount")
+        if not amount:
+            context.user_data.pop("state", None)
+            await message.reply_text("درخواست شارژ منقضی شده؛ دوباره شروع کن.")
+            return
+
+        if message.photo:
+            receipt_id = message.photo[-1].file_id
+            receipt_type = "photo"
+        elif message.document:
+            receipt_id = message.document.file_id
+            receipt_type = "document"
+        else:
+            await message.reply_text("لطفاً تصویر رسید یا فایل آن را بفرست.")
+            return
+
+        with connect_db() as con:
+            cur = con.execute(
+                """
+                INSERT INTO topups(
+                    user_id,amount,receipt_id,receipt_type,status,created_at
+                ) VALUES(?,?,?,?,?,?)
+                """,
+                (
+                    user.id,
+                    amount,
+                    receipt_id,
+                    receipt_type,
+                    "pending",
+                    now(),
+                ),
+            )
+            topup_id = cur.lastrowid
+            con.commit()
+
+        context.user_data.pop("topup_amount", None)
+        context.user_data.pop("state", None)
+
+        await message.reply_text(
+            f"رسید شارژ با شماره {topup_id} ارسال شد و منتظر بررسی مدیریت است."
+        )
+
+        if ADMIN_ID:
+            keyboard = InlineKeyboardMarkup([[
+                InlineKeyboardButton(
+                    "تأیید شارژ",
+                    callback_data=f"topup_approve:{topup_id}",
+                )
+            ]])
+            caption = (
+                f"درخواست شارژ کیف پول #{topup_id}\n"
+                f"کاربر: {user.id}\n"
+                f"مبلغ: {toman(amount)}"
+            )
+            try:
+                if receipt_type == "photo":
+                    await context.bot.send_photo(
+                        ADMIN_ID,
+                        receipt_id,
+                        caption=caption,
+                        reply_markup=keyboard,
+                    )
+                else:
+                    await context.bot.send_document(
+                        ADMIN_ID,
+                        receipt_id,
+                        caption=caption,
+                        reply_markup=keyboard,
+                    )
+            except TelegramError:
+                log.exception("Could not forward top-up receipt")
+
+        return
+
+    # Order receipt
+    if not message.photo and not message.document:
+        return
+
+    with connect_db() as con:
+        order = con.execute(
+            """
+            SELECT * FROM orders
+            WHERE user_id=? AND status='waiting_payment'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (user.id,),
+        ).fetchone()
+
+        if not order:
+            return
+
+        if message.photo:
+            receipt_id = message.photo[-1].file_id
+            receipt_type = "photo"
+        else:
+            receipt_id = message.document.file_id
+            receipt_type = "document"
+
+        con.execute(
+            """
+            UPDATE orders
+            SET status='receipt_sent',
+                receipt_id=?,
+                receipt_type=?,
+                updated_at=?
+            WHERE id=? AND status='waiting_payment'
+            """,
+            (receipt_id, receipt_type, now(), order["id"]),
+        )
+        con.commit()
+
+    context.user_data.pop("state", None)
 
     await message.reply_text(
-        f"رسید سفارش #{order['id']} دریافت شد.\n"
-        "پس از بررسی پرداخت، نتیجه اعلام می‌شود."
+        f"رسید سفارش VX{order['id']:06d} دریافت شد.\n"
+        "پس از بررسی مدیریت، نتیجه به تو اطلاع داده می‌شود.",
+        reply_markup=MAIN_MENU,
     )
 
-    if ADMIN_ID:
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "✅ تأیید پرداخت",
-                    callback_data=f"approve:{order['id']}",
-                ),
-                InlineKeyboardButton(
-                    "❌ رد پرداخت",
-                    callback_data=f"reject:{order['id']}",
-                ),
-            ]
-        ])
-
-        caption = (
-            f"رسید سفارش #{order['id']}\n"
-            f"کاربر: {user.id}\n"
-            f"محصول: {order['product']}\n"
-            f"مبلغ: {money(order['price'])}\n\n"
-            "قبل از تأیید، پرداخت واقعی را بررسی کن."
-        )
-
-        try:
-            if message.photo:
-                await context.bot.send_photo(
-                    ADMIN_ID,
-                    receipt_id,
-                    caption=caption,
-                    reply_markup=keyboard,
-                )
-            else:
-                await context.bot.send_document(
-                    ADMIN_ID,
-                    receipt_id,
-                    caption=caption,
-                    reply_markup=keyboard,
-                )
-        except Exception as e:
-            logger.warning("Receipt forwarding failed: %s", e)
+    await send_admin_order_receipt(context, order["id"])
 
 
-async def payment_decision(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    query = update.callback_query
+# =========================================================
+# ADMIN COMMANDS
+# =========================================================
 
-    if not is_admin(query.from_user.id):
-        await query.answer("اجازه دسترسی نداری.", show_alert=True)
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin(update.effective_user.id):
+        await update.effective_message.reply_text("اجازه دسترسی نداری.")
         return
 
-    await query.answer()
+    with connect_db() as con:
+        users = con.execute(
+            "SELECT COUNT(*) AS n FROM users"
+        ).fetchone()["n"]
 
-    action, order_id_text = query.data.split(":")
-    order_id = int(order_id_text)
+        orders = con.execute(
+            "SELECT COUNT(*) AS n FROM orders"
+        ).fetchone()["n"]
 
-    conn = db()
-    order = conn.execute(
-        "SELECT * FROM orders WHERE id = ?",
-        (order_id,),
-    ).fetchone()
+        pending = con.execute(
+            "SELECT COUNT(*) AS n FROM orders WHERE status='receipt_sent'"
+        ).fetchone()["n"]
 
-    if not order:
-        conn.close()
-        await query.edit_message_caption("سفارش پیدا نشد.")
+        revenue = con.execute(
+            """
+            SELECT COALESCE(SUM(price),0) AS n
+            FROM orders WHERE status='delivered'
+            """
+        ).fetchone()["n"]
+
+    await update.effective_message.reply_text(
+        "پنل مدیریت VEXORA\n\n"
+        f"کاربران: {users}\n"
+        f"کل سفارش‌ها: {orders}\n"
+        f"رسیدهای منتظر بررسی: {pending}\n"
+        f"مجموع مبلغ سفارش‌های تحویل‌شده: {toman(revenue)}\n\n"
+        "دستورات:\n"
+        "/orders — سفارش‌های اخیر\n"
+        "/approve ID — تأیید پرداخت\n"
+        "/reject ID — رد پرداخت\n"
+        "/delivered ID — ثبت تحویل واقعی\n"
+        "/setprice نام محصول|مبلغ — تغییر قیمت\n"
+        "/broadcast متن — ارسال پیام همگانی"
+    )
+
+
+async def admin_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin(update.effective_user.id):
         return
 
-    if order["status"] not in ("receipt_sent", "waiting_payment"):
-        conn.close()
-        await query.answer("این سفارش قبلاً بررسی شده.", show_alert=True)
+    with connect_db() as con:
+        orders = con.execute(
+            "SELECT * FROM orders ORDER BY id DESC LIMIT 20"
+        ).fetchall()
+
+    if not orders:
+        await update.effective_message.reply_text("هنوز سفارشی ثبت نشده.")
         return
 
-    if action == "approve":
-        conn.execute(
-            "UPDATE orders SET status = 'paid' WHERE id = ?",
-            (order_id,),
-        )
-        conn.commit()
-        conn.close()
-
-        await query.edit_message_caption(
-            f"✅ پرداخت سفارش #{order_id} تأیید شد.\n"
-            f"محصول: {order['product']}\n"
-            "برای تکمیل سفارش، تحویل محصول را جداگانه انجام بده."
-        )
-
-        try:
-            await context.bot.send_message(
-                order["user_id"],
-                f"پرداخت سفارش #{order_id} تأیید شد.\n"
-                "سفارش در انتظار تحویل است."
-            )
-        except Exception:
-            pass
-
-    else:
-        conn.execute(
-            "UPDATE orders SET status = 'rejected' WHERE id = ?",
-            (order_id,),
-        )
-        conn.commit()
-        conn.close()
-
-        await query.edit_message_caption(
-            f"❌ پرداخت سفارش #{order_id} رد شد."
-        )
-
-        try:
-            await context.bot.send_message(
-                order["user_id"],
-                f"پرداخت سفارش #{order_id} تأیید نشد.\n"
-                f"برای بررسی با {SUPPORT} تماس بگیر."
-            )
-        except Exception:
-            pass
-
-
-# ==================================================
-# ORDER HISTORY
-# ==================================================
-
-async def my_orders(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    user_id = update.effective_user.id
-
-    conn = db()
-    rows = conn.execute("""
-        SELECT id, product, price, status, created_at
-        FROM orders WHERE user_id = ?
-        ORDER BY id DESC LIMIT 10
-    """, (user_id,)).fetchall()
-    conn.close()
-
-    if not rows:
-        await update.effective_message.reply_text(
-            "هنوز سفارشی ثبت نکرده‌ای."
-        )
-        return
-
-    status_names = {
-        "waiting_payment": "در انتظار پرداخت",
-        "receipt_sent": "رسید ارسال شده",
-        "paid": "پرداخت تأیید شده؛ در انتظار تحویل",
-        "delivered": "تحویل شده",
-        "rejected": "پرداخت رد شده",
-    }
-
-    lines = ["📦 سفارش‌های اخیر تو:\n"]
-
-    for row in rows:
+    lines = []
+    for o in orders:
         lines.append(
-            f"#{row['id']} — {row['product']}\n"
-            f"مبلغ: {money(row['price'])}\n"
-            f"وضعیت: {status_names.get(row['status'], row['status'])}\n"
+            f"VX{o['id']:06d} | {o['product']}\n"
+            f"کاربر: {o['user_id']} | {toman(o['price'])}\n"
+            f"وضعیت: {STATUS.get(o['status'], o['status'])}\n"
         )
 
     await update.effective_message.reply_text("\n".join(lines))
 
 
-async def delivered(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    if not is_admin(update.effective_user.id):
+async def admin_approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin(update.effective_user.id):
         return
 
     if not context.args or not context.args[0].isdigit():
-        await update.effective_message.reply_text(
-            "روش استفاده:\n/delivered شماره_سفارش\n"
-            "مثال: /delivered 12"
-        )
+        await update.effective_message.reply_text("مثال: /approve 12")
         return
 
     order_id = int(context.args[0])
 
-    conn = db()
-    order = conn.execute(
-        "SELECT * FROM orders WHERE id = ?",
-        (order_id,),
-    ).fetchone()
+    with connect_db() as con:
+        order = con.execute(
+            "SELECT * FROM orders WHERE id=?",
+            (order_id,),
+        ).fetchone()
 
-    if not order:
-        conn.close()
-        await update.effective_message.reply_text(
-            "سفارش پیدا نشد."
+        if not order or order["status"] != "receipt_sent":
+            await update.effective_message.reply_text(
+                "سفارش پیدا نشد یا رسید آن قبلاً بررسی شده است."
+            )
+            return
+
+        con.execute(
+            """
+            UPDATE orders SET status='paid',updated_at=?
+            WHERE id=? AND status='receipt_sent'
+            """,
+            (now(), order_id),
         )
-        return
+        con.commit()
 
-    if order["status"] != "paid":
-        conn.close()
-        await update.effective_message.reply_text(
-            "ابتدا پرداخت سفارش باید تأیید شده باشد."
-        )
-        return
-
-    conn.execute(
-        "UPDATE orders SET status = 'delivered' WHERE id = ?",
-        (order_id,),
+    await context.bot.send_message(
+        order["user_id"],
+        f"پرداخت سفارش VX{order_id:06d} تأیید شد؛ سفارش در انتظار تحویل است."
     )
-    conn.commit()
-    conn.close()
-
     await update.effective_message.reply_text(
-        f"سفارش #{order_id} تحویل‌شده ثبت شد."
+        f"پرداخت تأیید شد. بعد از تحویل واقعی از /delivered {order_id} استفاده کن."
     )
 
-    try:
-        await context.bot.send_message(
-            order["user_id"],
-            f"سفارش #{order_id} تحویل داده شد.\n"
-            "از خریدت از VEXORA ممنونیم."
-        )
-    except Exception:
-        pass
 
-    try:
-        await context.bot.send_message(
-            chat_id=CHANNEL_ID,
-            text=(
-                "یک سفارش در VEXORA تکمیل شد.\n"
+async def admin_reject_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin(update.effective_user.id):
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await update.effective_message.reply_text("مثال: /reject 12")
+        return
+
+    order_id = int(context.args[0])
+
+    with connect_db() as con:
+        order = con.execute(
+            "SELECT * FROM orders WHERE id=?",
+            (order_id,),
+        ).fetchone()
+
+        if not order or order["status"] != "receipt_sent":
+            await update.effective_message.reply_text(
+                "سفارش پیدا نشد یا رسید قبلاً بررسی شده است."
+            )
+            return
+
+        con.execute(
+            """
+            UPDATE orders SET status='rejected',updated_at=?
+            WHERE id=? AND status='receipt_sent'
+            """,
+            (now(), order_id),
+        )
+        con.commit()
+
+    await context.bot.send_message(
+        order["user_id"],
+        f"رسید سفارش VX{order_id:06d} رد شد. برای پیگیری با {SUPPORT} تماس بگیر."
+    )
+    await update.effective_message.reply_text("رسید رد شد.")
+
+
+async def mark_delivered(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin(update.effective_user.id):
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await update.effective_message.reply_text("مثال: /delivered 12")
+        return
+
+    order_id = int(context.args[0])
+
+    with connect_db() as con:
+        order = con.execute(
+            "SELECT * FROM orders WHERE id=?",
+            (order_id,),
+        ).fetchone()
+
+        if not order:
+            await update.effective_message.reply_text("سفارش پیدا نشد.")
+            return
+
+        if order["status"] == "delivered":
+            await update.effective_message.reply_text(
+                "این سفارش قبلاً تحویل‌شده ثبت شده است."
+            )
+            return
+
+        if order["status"] != "paid":
+            await update.effective_message.reply_text(
+                "ابتدا باید پرداخت سفارش تأیید شده باشد."
+            )
+            return
+
+        con.execute(
+            """
+            UPDATE orders
+            SET status='delivered',updated_at=?,delivered_at=?
+            WHERE id=? AND status='paid'
+            """,
+            (now(), now(), order_id),
+        )
+
+        # One-time referral commission after delivery.
+        referral = con.execute(
+            """
+            SELECT * FROM referrals
+            WHERE invited_id=?
+            """,
+            (order["user_id"],),
+        ).fetchone()
+
+        if referral and not referral["commission_paid"]:
+            inviter_id = referral["inviter_id"]
+            commission = int(order["price"] * 0.50)
+
+            con.execute(
+                "UPDATE users SET balance=balance+? WHERE user_id=?",
+                (commission, inviter_id),
+            )
+            con.execute(
+                """
+                INSERT INTO wallet_transactions(
+                    user_id,amount,description,created_at
+                ) VALUES(?,?,?,?)
+                """,
+                (
+                    inviter_id,
+                    commission,
+                    f"پورسانت سفارش VX{order_id:06d}",
+                    now(),
+                ),
+            )
+            con.execute(
+                """
+                UPDATE referrals SET commission_paid=1
+                WHERE invited_id=?
+                """,
+                (order["user_id"],),
+            )
+
+        con.commit()
+
+    await context.bot.send_message(
+        order["user_id"],
+        f"سفارش VX{order_id:06d} به‌عنوان تحویل‌شده ثبت شد. ممنون از خریدت."
+    )
+
+    if not order["channel_posted"]:
+        try:
+            await context.bot.send_message(
+                CHANNEL_ID,
+                "VEXORA | سفارش تکمیل شد\n\n"
+                f"شماره سفارش: VX{order_id:06d}\n"
                 f"محصول: {order['product']}\n"
-                "از همراهی شما ممنونیم."
-            ),
-        )
-    except Exception as e:
-        logger.warning("Channel announcement failed: %s", e)
-
-
-# ==================================================
-# ADMIN PANEL / PRICE MANAGEMENT
-# ==================================================
-
-async def admin_panel(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    if not is_admin(update.effective_user.id):
-        await update.effective_message.reply_text(
-            "اجازه دسترسی نداری."
-        )
-        return
-
-    keyboard = [
-        [InlineKeyboardButton(
-            "💰 تغییر قیمت محصولات",
-            callback_data="admin_prices",
-        )],
-        [InlineKeyboardButton(
-            "📦 سفارش‌های در انتظار",
-            callback_data="admin_orders",
-        )],
-        [InlineKeyboardButton(
-            "📊 آمار فروشگاه",
-            callback_data="admin_stats",
-        )],
-    ]
-
-    await update.effective_message.reply_text(
-        "پنل مدیریت VEXORA",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-    )
-
-
-async def admin_callbacks(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    query = update.callback_query
-
-    if not is_admin(query.from_user.id):
-        await query.answer("دسترسی غیرمجاز.", show_alert=True)
-        return
-
-    await query.answer()
-
-    if query.data == "admin_prices":
-        rows = get_products()
-        keyboard = []
-
-        for row in rows:
-            keyboard.append([
-                InlineKeyboardButton(
-                    f"{row['name']} — {money(row['price'])}",
-                    callback_data=f"price:{row['name']}",
+                "وضعیت: تحویل‌شده"
+            )
+            with connect_db() as con:
+                con.execute(
+                    "UPDATE orders SET channel_posted=1 WHERE id=?",
+                    (order_id,),
                 )
-            ])
-
-        await query.edit_message_text(
-            "برای تغییر قیمت، محصول را انتخاب کن:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-        )
-
-    elif query.data.startswith("price:"):
-        name = query.data.split(":", 1)[1]
-        context.user_data["editing_price"] = name
-
-        await query.edit_message_text(
-            f"قیمت جدید برای «{name}» را فقط به عدد تومان بفرست.\n"
-            "مثال: 100000\n\n"
-            "برای لغو دستور /cancel را بفرست."
-        )
-
-    elif query.data == "admin_orders":
-        conn = db()
-        rows = conn.execute("""
-            SELECT id, user_id, product, price, status
-            FROM orders
-            WHERE status IN ('waiting_payment', 'receipt_sent', 'paid')
-            ORDER BY id DESC LIMIT 15
-        """).fetchall()
-        conn.close()
-
-        if not rows:
-            await query.edit_message_text(
-                "سفارش در انتظار بررسی وجود ندارد."
-            )
-            return
-
-        lines = ["سفارش‌های باز:\n"]
-
-        for row in rows:
-            lines.append(
-                f"#{row['id']} | {row['product']} | "
-                f"{money(row['price'])} | {row['status']}"
-            )
-
-        await query.edit_message_text("\n".join(lines))
-
-    elif query.data == "admin_stats":
-        conn = db()
-
-        users = conn.execute(
-            "SELECT COUNT(*) AS n FROM users"
-        ).fetchone()["n"]
-
-        orders = conn.execute(
-            "SELECT COUNT(*) AS n FROM orders"
-        ).fetchone()["n"]
-
-        paid = conn.execute("""
-            SELECT COALESCE(SUM(price), 0) AS total
-            FROM orders
-            WHERE status IN ('paid', 'delivered')
-        """).fetchone()["total"]
-
-        conn.close()
-
-        await query.edit_message_text(
-            "📊 آمار VEXORA\n\n"
-            f"کاربران ثبت‌شده: {users}\n"
-            f"کل سفارش‌ها: {orders}\n"
-            f"مجموع سفارش‌های پرداخت‌شده: {money(paid)}"
-        )
-
-
-async def admin_text(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    name = context.user_data.get("editing_price")
-
-    if not name:
-        return
-
-    if not is_admin(update.effective_user.id):
-        return
-
-    text = update.effective_message.text.strip()
-
-    if text == "/cancel":
-        context.user_data.pop("editing_price", None)
-        await update.effective_message.reply_text(
-            "تغییر قیمت لغو شد."
-        )
-        return
-
-    digits = text.replace(",", "").replace("٬", "")
-
-    if not digits.isdigit() or int(digits) < 0:
-        await update.effective_message.reply_text(
-            "قیمت معتبر نیست. فقط عدد تومان بفرست."
-        )
-        return
-
-    price = int(digits)
-
-    conn = db()
-    conn.execute(
-        "UPDATE products SET price = ? WHERE name = ?",
-        (price, name),
-    )
-    conn.commit()
-    conn.close()
-
-    context.user_data.pop("editing_price", None)
+                con.commit()
+        except TelegramError:
+            log.exception("Could not publish completion to channel")
 
     await update.effective_message.reply_text(
-        f"قیمت محصول «{name}» به {money(price)} تغییر کرد."
+        f"سفارش VX{order_id:06d} تحویل‌شده ثبت شد."
     )
 
 
-async def add_product(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    if not is_admin(update.effective_user.id):
+async def set_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin(update.effective_user.id):
         return
 
-    if len(context.args) < 2:
+    raw = update.effective_message.text.partition(" ")[2]
+    if "|" not in raw:
         await update.effective_message.reply_text(
-            "روش استفاده:\n"
-            "/addproduct نام_محصول قیمت\n"
-            "مثال:\n/addproduct گیفت_جدید 100000"
+            "فرمت:\n/setprice نام محصول|مبلغ\n"
+            "مثال:\n/setprice گیفت تدی|70000"
         )
         return
 
-    price_text = context.args[-1]
-
-    if not price_text.isdigit():
-        await update.effective_message.reply_text(
-            "قیمت باید عدد باشد."
-        )
-        return
-
-    name = " ".join(context.args[:-1]).replace("_", " ")
-    price = int(price_text)
-
-    conn = db()
-    conn.execute("""
-        INSERT INTO products (name, price, active)
-        VALUES (?, ?, 1)
-        ON CONFLICT(name)
-        DO UPDATE SET price = excluded.price, active = 1
-    """, (name, price))
-    conn.commit()
-    conn.close()
-
-    await update.effective_message.reply_text(
-        f"محصول «{name}» با قیمت {money(price)} ذخیره شد."
-    )
-
-
-# ==================================================
-# GROUP ECONOMY
-# ==================================================
-
-async def balance(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    user = update.effective_user
-    ensure_user(user)
-
-    conn = db()
-    row = conn.execute(
-        "SELECT coins, points FROM users WHERE user_id = ?",
-        (user.id,),
-    ).fetchone()
-    conn.close()
-
-    await update.effective_message.reply_text(
-        f"👤 {user.full_name}\n\n"
-        f"🪙 سکه: {row['coins']}\n"
-        f"🎁 امتیاز دعوت: {row['points']}"
-    )
-
-
-async def work(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    user = update.effective_user
-    ensure_user(user)
-
-    now = int(time.time())
-
-    conn = db()
-    row = conn.execute(
-        "SELECT last_work FROM users WHERE user_id = ?",
-        (user.id,),
-    ).fetchone()
-
-    wait = 3600 - (now - row["last_work"])
-
-    if wait > 0:
-        conn.close()
-        minutes = max(1, wait // 60)
-        await update.effective_message.reply_text(
-            f"هنوز خسته‌ای! {minutes} دقیقه دیگر دوباره تلاش کن."
-        )
-        return
-
-    reward = random.randint(50, 200)
-
-    conn.execute("""
-        UPDATE users
-        SET coins = coins + ?, last_work = ?
-        WHERE user_id = ?
-    """, (reward, now, user.id))
-
-    conn.commit()
-    conn.close()
-
-    await update.effective_message.reply_text(
-        f"💼 کار کردی و {reward} سکه گرفتی!"
-    )
-
-
-async def daily(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    user = update.effective_user
-    ensure_user(user)
-
-    now = int(time.time())
-
-    conn = db()
-    row = conn.execute(
-        "SELECT last_daily FROM users WHERE user_id = ?",
-        (user.id,),
-    ).fetchone()
-
-    if now - row["last_daily"] < 86400:
-        conn.close()
-        await update.effective_message.reply_text(
-            "پاداش روزانه را قبلاً دریافت کرده‌ای. فردا دوباره بیا."
-        )
-        return
-
-    reward = 300
-
-    conn.execute("""
-        UPDATE users
-        SET coins = coins + ?, last_daily = ?
-        WHERE user_id = ?
-    """, (reward, now, user.id))
-
-    conn.commit()
-    conn.close()
-
-    await update.effective_message.reply_text(
-        f"🎁 پاداش روزانه‌ات: {reward} سکه!"
-    )
-
-
-async def pay_coins(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    user = update.effective_user
-    ensure_user(user)
-
-    if len(context.args) != 2:
-        await update.effective_message.reply_text(
-            "روش استفاده:\n/pay شناسه_کاربر مقدار\n"
-            "مثال: /pay 123456789 50"
-        )
-        return
+    name, price_text = raw.rsplit("|", 1)
 
     try:
-        recipient = int(context.args[0])
-        amount = int(context.args[1])
+        price = int(price_text.strip())
     except ValueError:
+        await update.effective_message.reply_text("مبلغ معتبر نیست.")
+        return
+
+    name = name.strip()
+
+    if name not in PRODUCTS or price < 0:
         await update.effective_message.reply_text(
-            "شناسه و مقدار باید عدد باشند."
+            "محصول پیش‌فرض پیدا نشد یا قیمت نامعتبر است."
         )
         return
 
-    if recipient == user.id or amount <= 0:
-        await update.effective_message.reply_text(
-            "اطلاعات انتقال معتبر نیست."
-        )
-        return
-
-    conn = db()
-
-    sender_row = conn.execute(
-        "SELECT coins FROM users WHERE user_id = ?",
-        (user.id,),
-    ).fetchone()
-
-    recipient_row = conn.execute(
-        "SELECT user_id FROM users WHERE user_id = ?",
-        (recipient,),
-    ).fetchone()
-
-    if not sender_row or sender_row["coins"] < amount:
-        conn.close()
-        await update.effective_message.reply_text(
-            "سکه کافی نداری."
-        )
-        return
-
-    if not recipient_row:
-        conn.close()
-        await update.effective_message.reply_text(
-            "این کاربر هنوز ربات را شروع نکرده است."
-        )
-        return
-
-    conn.execute(
-        "UPDATE users SET coins = coins - ? WHERE user_id = ?",
-        (amount, user.id),
-    )
-    conn.execute(
-        "UPDATE users SET coins = coins + ? WHERE user_id = ?",
-        (amount, recipient),
-    )
-
-    conn.commit()
-    conn.close()
+    PRODUCTS[name] = (price, PRODUCTS[name][1])
 
     await update.effective_message.reply_text(
-        f"✅ {amount} سکه برای کاربر {recipient} ارسال شد."
+        f"قیمت {name} در حافظه ربات به {toman(price)} تغییر کرد.\n"
+        "توجه: این تغییر پس از راه‌اندازی مجدد به حالت پیش‌فرض برمی‌گردد."
     )
 
 
-# ==================================================
-# REFERRALS / MISSIONS
-# ==================================================
-
-async def referrals(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    user = update.effective_user
-    ensure_user(user)
-
-    bot_username = context.bot.username
-
-    conn = db()
-    row = conn.execute(
-        "SELECT points FROM users WHERE user_id = ?",
-        (user.id,),
-    ).fetchone()
-
-    invited = conn.execute(
-        "SELECT COUNT(*) AS n FROM referrals WHERE inviter_id = ?",
-        (user.id,),
-    ).fetchone()["n"]
-
-    conn.close()
-
-    link = f"https://t.me/{bot_username}?start={user.id}"
-
-    await update.effective_message.reply_text(
-        "🎁 دعوت دوستان VEXORA\n\n"
-        f"لینک اختصاصی تو:\n{link}\n\n"
-        f"تعداد دعوت‌های ثبت‌شده: {invited}\n"
-        f"امتیازهای تو: {row['points']}\n\n"
-        "هر عضو جدیدی که با لینک تو وارد شود، "
-        "یک امتیاز برایت ثبت می‌کند.\n"
-        "برای دریافت پاداش با پشتیبانی هماهنگ کن."
-    )
-
-
-# ==================================================
-# LOVE / GROUP EVENTS
-# ==================================================
-
-async def love(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    if update.effective_chat.type == "private":
-        await update.effective_message.reply_text(
-            "این قابلیت را در گروه استفاده کن."
-        )
+async def broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not admin(update.effective_user.id):
         return
 
-    members = update.effective_message.text.split()
-
-    if len(members) >= 2:
-        first = members[1]
-        second = members[2] if len(members) >= 3 else "یک نفر خاص"
-
-        percent = random.randint(1, 100)
-
-        await update.effective_message.reply_text(
-            f"❤️ میزان عشق بین {first} و {second}: {percent}%"
-        )
-    else:
-        await update.effective_message.reply_text(
-            "روش استفاده:\n/love @user1 @user2"
-        )
-
-
-async def hug(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    if update.effective_chat.type == "private":
-        await update.effective_message.reply_text(
-            "این قابلیت را در گروه استفاده کن."
-        )
+    text = update.effective_message.text.partition(" ")[2].strip()
+    if not text:
+        await update.effective_message.reply_text("مثال: /broadcast سلام")
         return
 
-    target = "همه"
+    with connect_db() as con:
+        users = con.execute("SELECT user_id FROM users").fetchall()
 
-    if context.args:
-        target = " ".join(context.args)
+    sent = 0
+    failed = 0
 
-    await update.effective_message.reply_text(
-        f"🫂 {update.effective_user.full_name} "
-        f"برای {target} یک بغل فرستاد!"
-    )
-
-
-async def love_event(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    if update.effective_chat.type == "private":
-        await update.effective_message.reply_text(
-            "این رویداد را در گروه اجرا کن."
-        )
-        return
+    for row in users:
+        try:
+            await context.bot.send_message(row["user_id"], text)
+            sent += 1
+        except TelegramError:
+            failed += 1
 
     await update.effective_message.reply_text(
-        "💞 رویداد عشق شروع شد!\n\n"
-        "اعضا می‌توانند با دستور /love نام دو نفر را بررسی کنند."
+        f"ارسال تمام شد.\nموفق: {sent}\nناموفق: {failed}"
     )
 
 
-async def income_event(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    if update.effective_chat.type == "private":
-        await update.effective_message.reply_text(
-            "این رویداد را در گروه اجرا کن."
-        )
-        return
+# =========================================================
+# CANCEL / HELP
+# =========================================================
 
-    user = update.effective_user
-    ensure_user(user)
-
-    reward = random.randint(100, 500)
-
-    conn = db()
-    conn.execute(
-        "UPDATE users SET coins = coins + ? WHERE user_id = ?",
-        (reward, user.id),
-    )
-    conn.commit()
-    conn.close()
-
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
     await update.effective_message.reply_text(
-        f"💸 رویداد درآمد شروع شد!\n"
-        f"{user.full_name} برنده {reward} سکه شد."
+        "عملیات لغو شد.",
+        reply_markup=MAIN_MENU,
     )
 
 
-# ==================================================
-# ANTI-LINK
-# ==================================================
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.effective_message.reply_text(
+        "راهنمای ربات VEXORA\n\n"
+        "/start — شروع\n"
+        "/cancel — لغو عملیات\n"
+        "/help — راهنما\n\n"
+        f"پشتیبانی: {SUPPORT}",
+        reply_markup=MAIN_MENU,
+    )
 
-async def anti_link(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
+
+# =========================================================
+# GROUP FEATURES
+# =========================================================
+
+async def group_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.effective_message
+    user = update.effective_user
 
-    if not message or not message.text:
+    if not message or not user or message.chat.type == "private":
         return
 
-    if message.chat.type == "private":
-        return
+    # Only react to the administrator's messages.
+    if admin(user.id):
+        try:
+            await message.set_reaction(
+                reaction=[{"type": "emoji", "emoji": "🖤"}]
+            )
+        except (TelegramError, TypeError):
+            # Reactions depend on Telegram API permissions and chat settings.
+            pass
 
-    text = message.text.lower()
+    text = (message.text or "").lower()
 
-    contains_link = (
-        "https://" in text
-        or "http://" in text
-        or "t.me/" in text
-        or "telegram.me/" in text
-    )
-
-    if not contains_link:
-        return
-
-    try:
-        member = await context.bot.get_chat_member(
-            message.chat.id,
-            update.effective_user.id,
-        )
-
-        if member.status in ("administrator", "creator"):
-            return
-
-        await message.delete()
-
-        warning = await context.bot.send_message(
-            message.chat.id,
-            "⚠️ ارسال لینک در این گروه مجاز نیست.",
-        )
-
-        context.job_queue.run_once(
-            delete_warning,
-            8,
-            data={
-                "chat_id": warning.chat_id,
-                "message_id": warning.message_id,
-            },
-        )
-
-    except Exception as e:
-        logger.warning("Anti-link error: %s", e)
-
-
-async def delete_warning(
-    context: ContextTypes.DEFAULT_TYPE
-):
-    data = context.job.data
-
-    try:
-        await context.bot.delete_message(
-            chat_id=data["chat_id"],
-            message_id=data["message_id"],
-        )
-    except Exception:
-        pass
-
-
-# ==================================================
-# TEXT MENU
-# ==================================================
-
-async def text_router(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    message = update.effective_message
-    if not message or not message.text:
-        return
-
-    text = message.text.strip()
-
-    # Admin price input takes priority.
-    if context.user_data.get("editing_price"):
-        await admin_text(update, context)
-        return
-
-    if context.user_data.get("waiting_target"):
-        await handle_target(update, context)
-        return
-
-    if text == "🛍 فروشگاه":
-        await show_store(update, context)
-
-    elif text == "📦 سفارش‌های من":
-        await my_orders(update, context)
-
-    elif text == "💰 کیف پول":
-        await balance(update, context)
-
-    elif text == "🎁 دعوت دوستان":
-        await referrals(update, context)
-
-    elif text == "📜 راهنمای پرداخت":
+    # Simple opt-in commands for group events.
+    if text in ("!عشق", "/عشق"):
         await message.reply_text(
-            "۱. محصول را از فروشگاه انتخاب کن.\n"
-            "۲. یوزرنیم مقصد را بفرست.\n"
-            "۳. مبلغ نمایش‌داده‌شده را پرداخت کن.\n"
-            "۴. رسید را در همین ربات ارسال کن.\n"
-            "۵. پس از بررسی مدیر، نتیجه اعلام می‌شود.\n\n"
-            "هرگز رمز عبور یا کد ورود تلگرام را برای کسی نفرست."
+            "ایونت عشق VEXORA فعال شد.\n"
+            "برای سرگرمی و تعامل دوستانه؛ بدون شرط‌بندی واقعی."
         )
 
-    elif text == "🎧 پشتیبانی":
+    elif text in ("!درآمد", "/درآمد"):
         await message.reply_text(
-            f"برای پیگیری سفارش با {SUPPORT} تماس بگیر."
+            "ایونت درآمد VEXORA\n"
+            "برای اطلاع از محصولات و پیشنهادها به ربات مراجعه کن."
+        )
+
+    elif text in ("!قمار", "/قمار"):
+        await message.reply_text(
+            "بازی شانسی با پول واقعی در این ربات فعال نیست."
         )
 
 
-# ==================================================
-# HELP / CANCEL
-# ==================================================
-
-async def help_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    await update.effective_message.reply_text(
-        "دستورات ربات VEXORA:\n\n"
-        "/start - شروع\n"
-        "/admin - پنل مدیریت\n"
-        "/products - نمایش محصولات\n"
-        "/addproduct نام_محصول قیمت - افزودن محصول\n"
-        "/delivered شماره - ثبت تحویل سفارش\n"
-        "/balance - موجودی سکه\n"
-        "/work - کار و دریافت سکه\n"
-        "/daily - پاداش روزانه\n"
-        "/pay شناسه مقدار - انتقال سکه\n"
-        "/love @user1 @user2 - سنجش عشق\n"
-        "/hug نام - ارسال بغل\n"
-        "/loveevent - رویداد عشق\n"
-        "/incomeevent - رویداد درآمد\n"
-        "/cancel - لغو تغییر قیمت"
-    )
-
-
-async def products_command(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    rows = get_products()
-
-    if not rows:
-        await update.effective_message.reply_text(
-            "محصولی وجود ندارد."
-        )
-        return
-
-    lines = ["🛍 محصولات VEXORA\n"]
-
-    for row in rows:
-        lines.append(f"{row['name']} — {money(row['price'])}")
-
-    await update.effective_message.reply_text("\n".join(lines))
-
-
-async def cancel(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    context.user_data.pop("editing_price", None)
-    context.user_data.pop("waiting_target", None)
-    context.user_data.pop("selected_product", None)
-
-    await update.effective_message.reply_text(
-        "عملیات جاری لغو شد.",
-        reply_markup=main_menu(),
-    )
-
-
-# ==================================================
+# =========================================================
 # ERROR HANDLER
-# ==================================================
+# =========================================================
 
-async def error_handler(
-    update: object,
-    context: ContextTypes.DEFAULT_TYPE
-):
-    logger.error(
-        "Unhandled exception",
-        exc_info=context.error,
-    )
+async def error_handler(update, context):
+    log.error("Unhandled exception: %s", context.error)
 
 
-# ==================================================
+# =========================================================
 # MAIN
-# ==================================================
+# =========================================================
 
 def main():
     if not BOT_TOKEN:
         raise RuntimeError(
-            "BOT_TOKEN تنظیم نشده است. "
-            "توکن را در Environment Variables هاست ثبت کن."
+            "متغیر محیطی BOT_TOKEN تنظیم نشده است."
         )
 
     if ADMIN_ID == 0:
-        logger.warning(
-            "ADMIN_ID تنظیم نشده است؛ امکانات مدیر کار نخواهند کرد."
+        raise RuntimeError(
+            "متغیر محیطی ADMIN_ID تنظیم نشده است."
         )
 
     init_db()
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    # Commands
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("admin", admin_panel))
-    app.add_handler(CommandHandler("products", products_command))
-    app.add_handler(CommandHandler("addproduct", add_product))
-    app.add_handler(CommandHandler("delivered", delivered))
-    app.add_handler(CommandHandler("balance", balance))
-    app.add_handler(CommandHandler("work", work))
-    app.add_handler(CommandHandler("daily", daily))
-    app.add_handler(CommandHandler("pay", pay_coins))
-    app.add_handler(CommandHandler("love", love))
-    app.add_handler(CommandHandler("hug", hug))
-    app.add_handler(CommandHandler("loveevent", love_event))
-    app.add_handler(CommandHandler("incomeevent", income_event))
     app.add_handler(CommandHandler("cancel", cancel))
 
-    # Callbacks
-    app.add_handler(
-        CallbackQueryHandler(
-            product_selected,
-            pattern=r"^product:",
-        )
-    )
+    app.add_handler(CommandHandler("admin", admin_panel))
+    app.add_handler(CommandHandler("orders", admin_orders))
+    app.add_handler(CommandHandler("approve", admin_approve_command))
+    app.add_handler(CommandHandler("reject", admin_reject_command))
+    app.add_handler(CommandHandler("delivered", mark_delivered))
+    app.add_handler(CommandHandler("setprice", set_price))
+    app.add_handler(CommandHandler("broadcast", broadcast))
 
-    app.add_handler(
-        CallbackQueryHandler(
-            create_order,
-            pattern=r"^create_order$",
-        )
-    )
+    app.add_handler(CallbackQueryHandler(callbacks))
 
-    app.add_handler(
-        CallbackQueryHandler(
-            payment_decision,
-            pattern=r"^(approve|reject):",
-        )
-    )
-
-    app.add_handler(
-        CallbackQueryHandler(
-            admin_callbacks,
-            pattern=r"^(admin_prices|admin_orders|admin_stats|price:)",
-        )
-    )
-
-    # Receipt messages
     app.add_handler(
         MessageHandler(
             filters.PHOTO | filters.Document.ALL,
-            receive_receipt,
+            receipt_handler,
         )
     )
 
-    # Group anti-link
     app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            anti_link,
-        ),
-        group=1,
+            filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE,
+            text_input,
+        )
     )
 
-    # Text menus and pending input
     app.add_handler(
         MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            text_router,
-        ),
-        group=2,
+            filters.TEXT & ~filters.COMMAND & ~filters.ChatType.PRIVATE,
+            group_handler,
+        )
     )
 
     app.add_error_handler(error_handler)
 
-    logger.info("VEXORA bot is starting...")
+    log.info("VEXORA STORE is starting...")
     app.run_polling(drop_pending_updates=False)
 
 
